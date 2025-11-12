@@ -14,7 +14,13 @@ Complete monitoring infrastructure for PicoCluster clusters:
   - Container metrics: `monitoring/metrics_collection/install_container_metrics.ansible`
   - Cluster deployment: `monitoring/metrics_collection/deploy_metrics_to_cluster.ansible`
 
-- **Grafana Dashboards** (9 pre-configured)
+- **Loki Log Aggregation (Optional)**
+  - RPI5 Ubuntu: `monitoring/rpi5_ubuntu/install_loki.ansible`
+  - RPI5 Raspbian: `monitoring/rpi5_raspbian/install_loki.ansible`
+  - Promtail log shipper: `monitoring/metrics_collection/install_promtail.ansible`
+  - Log dashboard included
+
+- **Grafana Dashboards** (10 pre-configured)
   - Cluster Overview
   - System Metrics
   - Docker Metrics
@@ -24,6 +30,7 @@ Complete monitoring infrastructure for PicoCluster clusters:
   - Network Performance
   - Capacity Planning
   - Workload Performance
+  - Logs Overview (with Loki)
 
 - **Prometheus Configuration**
   - 31 alert rules with Slack/email notifications
@@ -32,8 +39,9 @@ Complete monitoring infrastructure for PicoCluster clusters:
 
 - **Documentation**
   - `MONITORING_SETUP_GUIDE.md`: Complete monitoring setup
+  - `LOKI_SETUP_GUIDE.md`: Optional log aggregation setup
   - `ALERT_RULES_GUIDE.md`: Alert rules reference
-  - `DASHBOARDS_README.md`: Dashboard overview (9 dashboards)
+  - `DASHBOARDS_README.md`: Dashboard overview (10 dashboards)
 
 ### Cluster Management Directory
 Tools for managing and maintaining PicoCluster:
@@ -71,6 +79,10 @@ ansible-playbook monitoring/metrics_collection/install_container_metrics.ansible
 
 # Deploy all metrics collectors to cluster
 ansible-playbook monitoring/metrics_collection/deploy_metrics_to_cluster.ansible
+
+# Optional: Add log aggregation (see LOKI_SETUP_GUIDE.md)
+ansible-playbook monitoring/rpi5_ubuntu/install_loki.ansible
+ansible-playbook monitoring/metrics_collection/install_promtail.ansible
 ```
 
 ### Manage Cluster
@@ -94,15 +106,18 @@ ansible-playbook cluster-management/backup_cluster_state.ansible
 | File | Contents |
 |------|----------|
 | `monitoring/MONITORING_SETUP_GUIDE.md` | Complete monitoring setup guide (300+ lines) |
-| `monitoring/config/grafana/DASHBOARDS_README.md` | 9 dashboard overview (500+ lines) |
+| `monitoring/LOKI_SETUP_GUIDE.md` | Optional log aggregation setup (350+ lines) |
+| `monitoring/config/grafana/DASHBOARDS_README.md` | 10 dashboard overview (500+ lines) |
 | `cluster-management/CLUSTER_MANAGEMENT_GUIDE.md` | All management tools guide (555 lines) |
 | `cluster-management/ALERT_RULES_GUIDE.md` | 31 alert rules reference (400+ lines) |
+| `PICO_OBSERVABILITY_COMPARISON.md` | Feature comparison with pico-observability SaaS |
 
 ## Key Features
 
 ### Monitoring
 - Real-time metrics collection (Prometheus)
-- Beautiful dashboards (Grafana with 9 pre-configured)
+- Beautiful dashboards (Grafana with 10 pre-configured)
+- Optional log aggregation (Loki + Promtail)
 - Multi-architecture support (ARM64, x86-64)
 - Container metrics (Docker, Containerd, Kubernetes)
 - Automatic service discovery
@@ -118,6 +133,7 @@ ansible-playbook cluster-management/backup_cluster_state.ansible
 
 ## Architecture
 
+### Metrics Stack (Core)
 ```
 Cluster Nodes
     ↓
@@ -129,7 +145,18 @@ Prometheus (scrapes metrics)
     ↓
 Grafana (visualizes)
     ↓
-9 Pre-configured Dashboards
+10 Pre-configured Dashboards
+```
+
+### Optional: Logs Stack
+```
+Cluster Nodes
+    ↓
+Promtail (log shipper)
+    ↓
+Loki (log aggregation)
+    ↓
+Grafana (visualizes logs)
 ```
 
 ## Alert Rules

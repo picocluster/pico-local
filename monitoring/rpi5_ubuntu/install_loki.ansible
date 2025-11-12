@@ -1,0 +1,209 @@
+---
+# Ansible Playbook: Install Grafana Loki on RPI5 Ubuntu
+# Purpose: Set up Loki log aggregation service for pico-local
+# Target: RPI5 running Ubuntu (ARM64)
+
+- name: Install Grafana Loki on RPI5 Ubuntu
+  hosts: monitoring_server
+  become: yes
+  vars:
+    loki_version: "2.9.3"
+    loki_user: "loki"
+    loki_group: "loki"
+    loki_install_dir: "/usr/local/bin"
+    loki_config_dir: "/etc/loki"
+    loki_data_dir: "/var/lib/loki"
+    loki_port: 3100
+    loki_arch: "arm64"  # For RPI5
+
+  tasks:
+    - name: Create Loki system user
+      user:
+        name: "{{ loki_user }}"
+        system: yes
+        shell: /bin/false
+        home: "{{ loki_data_dir }}"
+        create_home: no
+      tags: [install]
+
+    - name: Create Loki directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ loki_user }}"
+        group: "{{ loki_group }}"
+        mode: '0755'
+      loop:
+        - "{{ loki_config_dir }}"
+        - "{{ loki_data_dir }}"
+        - "{{ loki_data_dir }}/chunks"
+        - "{{ loki_data_dir }}/rules"
+        - "{{ loki_data_dir }}/tsdb-index"
+        - "{{ loki_data_dir }}/tsdb-cache"
+        - "{{ loki_data_dir }}/compactor"
+        - "{{ loki_data_dir }}/rules-temp"
+      tags: [install]
+
+    - name: Download Loki binary
+      get_url:
+        url: "https://github.com/grafana/loki/releases/download/v{{ loki_version }}/loki-linux-{{ loki_arch }}.zip"
+        dest: "/tmp/loki.zip"
+        mode: '0644'
+      tags: [install]
+
+    - name: Install unzip if not present
+      apt:
+        name: unzip
+        state: present
+        update_cache: yes
+      tags: [install]
+
+    - name: Extract Loki binary
+      unarchive:
+        src: "/tmp/loki.zip"
+        dest: "/tmp"
+        remote_src: yes
+      tags: [install]
+
+    - name: Install Loki binary
+      copy:
+        src: "/tmp/loki-linux-{{ loki_arch }}"
+        dest: "{{ loki_install_dir }}/loki"
+        owner: root
+        group: root
+        mode: '0755'
+        remote_src: yes
+      tags: [install]
+
+    - name: Copy Loki configuration
+      copy:
+        src: "../config/loki/loki-local.yml"
+        dest: "{{ loki_config_dir }}/loki-local.yml"
+        owner: "{{ loki_user }}"
+        group: "{{ loki_group }}"
+        mode: '0644'
+      notify: restart loki
+      tags: [config]
+
+    - name: Create Loki systemd service
+      copy:
+        dest: /etc/systemd/system/loki.service
+        content: |
+          [Unit]
+          Description=Grafana Loki Log Aggregation
+          Documentation=https://grafana.com/docs/loki/latest/
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ loki_user }}
+          Group={{ loki_group }}
+          ExecStart={{ loki_install_dir }}/loki -config.file={{ loki_config_dir }}/loki-local.yml
+          Restart=on-failure
+          RestartSec=10
+          LimitNOFILE=65536
+
+          # Performance optimizations for RPI5
+          Nice=-5
+          CPUWeight=200
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: restart loki
+      tags: [install, config]
+
+    - name: Enable and start Loki service
+      systemd:
+        name: loki
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      tags: [install]
+
+    - name: Wait for Loki to be ready
+      uri:
+        url: "http://localhost:{{ loki_port }}/ready"
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 12
+      delay: 5
+      tags: [install, verify]
+
+    - name: Display Loki status
+      debug:
+        msg: |
+          =============================================
+          Loki Installation Complete!
+          =============================================
+
+          Service Status: Active
+          Version: {{ loki_version }}
+          API Endpoint: http://{{ ansible_default_ipv4.address }}:{{ loki_port }}
+          Config File: {{ loki_config_dir }}/loki-local.yml
+          Data Directory: {{ loki_data_dir }}
+          Log Retention: 7 days
+
+          Next Steps:
+          1. Install Promtail on cluster nodes: install_promtail.ansible
+          2. Add Loki datasource to Grafana
+          3. Import log dashboards
+
+          Check status: sudo systemctl status loki
+          View logs: sudo journalctl -u loki -f
+          Test API: curl http://localhost:{{ loki_port }}/ready
+          =============================================
+      tags: [install, verify]
+
+    - name: Verify Loki is responding
+      uri:
+        url: "http://localhost:{{ loki_port }}/loki/api/v1/labels"
+        method: GET
+        return_content: yes
+      register: loki_labels
+      tags: [verify]
+
+    - name: Show Loki API response
+      debug:
+        msg: "Loki API is responding: {{ loki_labels.json }}"
+      tags: [verify]
+
+  handlers:
+    - name: restart loki
+      systemd:
+        name: loki
+        state: restarted
+        daemon_reload: yes
+
+# Post-installation verification
+- name: Post-Installation Checks
+  hosts: monitoring_server
+  become: yes
+  tasks:
+    - name: Check Loki service status
+      command: systemctl is-active loki
+      register: loki_status
+      changed_when: false
+      tags: [verify]
+
+    - name: Verify Loki port is listening
+      wait_for:
+        port: "{{ loki_port }}"
+        timeout: 10
+      tags: [verify]
+
+    - name: Display firewall note
+      debug:
+        msg: |
+          =============================================
+          FIREWALL CONFIGURATION
+          =============================================
+
+          If using UFW firewall, allow Loki port:
+          sudo ufw allow {{ loki_port }}/tcp comment 'Loki'
+
+          Loki is now ready to receive logs from Promtail agents.
+          =============================================
+      tags: [verify]

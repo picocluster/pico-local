@@ -1,0 +1,95 @@
+# Loki configuration for pico-local (single-tenant, homelab use)
+# Optimized for RPi5 with limited resources
+
+auth_enabled: false  # Single-tenant local deployment
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+
+common:
+  path_prefix: /var/lib/loki
+  storage:
+    filesystem:
+      chunks_directory: /var/lib/loki/chunks
+      rules_directory: /var/lib/loki/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+# Schema configuration
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# Limits optimized for homelab (adjust based on your needs)
+limits_config:
+  enforce_metric_name: false
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h  # 7 days
+  max_entries_limit_per_query: 10000
+  ingestion_rate_mb: 20  # 20 MB/minute should be plenty for homelab
+  ingestion_burst_size_mb: 30
+  max_streams_per_user: 10000
+  max_line_size: 256kb
+  max_query_length: 721h  # 30 days
+  max_query_parallelism: 32
+
+# Compactor for cleaning up old data
+compactor:
+  working_directory: /var/lib/loki/compactor
+  shared_store: filesystem
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+
+# Retention policy (7 days for homelab)
+table_manager:
+  retention_deletes_enabled: true
+  retention_period: 168h  # 7 days
+
+# Query limits
+query_range:
+  parallelise_shardable_queries: true
+  max_retries: 5
+
+# Chunk store config
+chunk_store_config:
+  max_look_back_period: 168h  # Match retention
+
+# Storage config
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /var/lib/loki/tsdb-index
+    cache_location: /var/lib/loki/tsdb-cache
+    shared_store: filesystem
+  filesystem:
+    directory: /var/lib/loki/chunks
+
+# Disable analytics
+analytics:
+  reporting_enabled: false
+
+# Ruler for alerting (optional)
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /var/lib/loki/rules
+  rule_path: /var/lib/loki/rules-temp
+  alertmanager_url: http://localhost:9093
+  ring:
+    kvstore:
+      store: inmemory
+  enable_api: true
+  enable_alertmanager_v2: true

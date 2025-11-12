@@ -1,5 +1,5 @@
 # Grafana Datasources Provisioning Configuration
-# Automatically configures Prometheus as a datasource
+# Automatically configures Prometheus and Loki as datasources
 
 apiVersion: 1
 
@@ -13,5 +13,22 @@ datasources:
     jsonData:
       timeInterval: 15s
       queryTimeout: 30s
+    basicAuth: false
+    withCredentials: false
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://localhost:3100
+    isDefault: false
+    editable: true
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        # Link traces from logs (if using tracing)
+        - datasourceUid: prometheus
+          matcherRegex: "traceID=(\\w+)"
+          name: TraceID
+          url: "$${__value.raw}"
     basicAuth: false
     withCredentials: false

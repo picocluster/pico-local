@@ -1,0 +1,308 @@
+---
+# Ansible Playbook: Install Promtail Log Shipper
+# Purpose: Deploy Promtail on cluster nodes to ship logs to Loki
+# Target: All cluster nodes (ARM64, AMD64, ARMv7)
+
+- name: Install Promtail on Cluster Nodes
+  hosts: cluster_nodes
+  become: yes
+  vars:
+    promtail_version: "2.9.3"
+    promtail_user: "promtail"
+    promtail_group: "promtail"
+    promtail_install_dir: "/usr/local/bin"
+    promtail_config_dir: "/etc/promtail"
+    promtail_data_dir: "/var/lib/promtail"
+    promtail_port: 9080
+    # Set your Loki server address here
+    loki_server: "http://{{ groups['monitoring_server'][0] }}:3100"
+
+  tasks:
+    - name: Detect system architecture
+      set_fact:
+        promtail_arch: "{{ 'amd64' if ansible_architecture == 'x86_64' else ('arm64' if ansible_architecture == 'aarch64' else 'arm') }}"
+      tags: [install]
+
+    - name: Display detected architecture
+      debug:
+        msg: "Detected architecture: {{ ansible_architecture }} -> Using: {{ promtail_arch }}"
+      tags: [install]
+
+    - name: Install required packages
+      package:
+        name:
+          - unzip
+          - curl
+        state: present
+      tags: [install]
+
+    - name: Create Promtail system user
+      user:
+        name: "{{ promtail_user }}"
+        system: yes
+        shell: /bin/false
+        home: "{{ promtail_data_dir }}"
+        create_home: no
+        groups: adm  # Allow reading /var/log
+      tags: [install]
+
+    - name: Create Promtail directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ promtail_user }}"
+        group: "{{ promtail_group }}"
+        mode: '0755'
+      loop:
+        - "{{ promtail_config_dir }}"
+        - "{{ promtail_data_dir }}"
+        - "{{ promtail_data_dir }}/positions"
+      tags: [install]
+
+    - name: Download Promtail binary
+      get_url:
+        url: "https://github.com/grafana/loki/releases/download/v{{ promtail_version }}/promtail-linux-{{ promtail_arch }}.zip"
+        dest: "/tmp/promtail.zip"
+        mode: '0644'
+      tags: [install]
+
+    - name: Extract Promtail binary
+      unarchive:
+        src: "/tmp/promtail.zip"
+        dest: "/tmp"
+        remote_src: yes
+      tags: [install]
+
+    - name: Install Promtail binary
+      copy:
+        src: "/tmp/promtail-linux-{{ promtail_arch }}"
+        dest: "{{ promtail_install_dir }}/promtail"
+        owner: root
+        group: root
+        mode: '0755'
+        remote_src: yes
+      tags: [install]
+
+    - name: Check if Docker is installed
+      command: docker --version
+      register: docker_check
+      ignore_errors: yes
+      changed_when: false
+      tags: [config]
+
+    - name: Set Docker installed fact
+      set_fact:
+        docker_installed: "{{ docker_check.rc == 0 }}"
+      tags: [config]
+
+    - name: Create Promtail configuration
+      copy:
+        dest: "{{ promtail_config_dir }}/config.yml"
+        content: |
+          server:
+            http_listen_port: {{ promtail_port }}
+            grpc_listen_port: 0
+            log_level: info
+
+          positions:
+            filename: {{ promtail_data_dir }}/positions/positions.yaml
+
+          clients:
+            - url: {{ loki_server }}/loki/api/v1/push
+              timeout: 30s
+              backoff_config:
+                min_period: 1s
+                max_period: 10s
+                max_retries: 10
+
+          scrape_configs:
+            # System logs
+            - job_name: system
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: varlogs
+                    host: {{ ansible_hostname }}
+                    __path__: /var/log/*.log
+
+            # Syslog
+            - job_name: syslog
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: syslog
+                    host: {{ ansible_hostname }}
+                    __path__: /var/log/syslog
+
+            # Auth log
+            - job_name: auth
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: auth
+                    host: {{ ansible_hostname }}
+                    __path__: /var/log/auth.log
+
+            # Systemd journal
+            - job_name: journal
+              journal:
+                max_age: 12h
+                labels:
+                  job: systemd-journal
+                  host: {{ ansible_hostname }}
+
+          {% if docker_installed %}
+            # Docker container logs
+            - job_name: docker
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: docker
+                    host: {{ ansible_hostname }}
+                    __path__: /var/lib/docker/containers/*/*.log
+              pipeline_stages:
+                - json:
+                    expressions:
+                      log: log
+                      stream: stream
+                      time: time
+                - timestamp:
+                    source: time
+                    format: RFC3339Nano
+                - output:
+                    source: log
+          {% endif %}
+        owner: "{{ promtail_user }}"
+        group: "{{ promtail_group }}"
+        mode: '0644'
+      notify: restart promtail
+      tags: [config]
+
+    - name: Add Promtail user to docker group (if Docker installed)
+      user:
+        name: "{{ promtail_user }}"
+        groups: docker
+        append: yes
+      when: docker_installed
+      tags: [config]
+
+    - name: Create Promtail systemd service
+      copy:
+        dest: /etc/systemd/system/promtail.service
+        content: |
+          [Unit]
+          Description=Promtail Log Shipper
+          Documentation=https://grafana.com/docs/loki/latest/clients/promtail/
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ promtail_user }}
+          Group={{ promtail_group }}
+          ExecStart={{ promtail_install_dir }}/promtail -config.file={{ promtail_config_dir }}/config.yml
+          Restart=on-failure
+          RestartSec=10
+          LimitNOFILE=65536
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: restart promtail
+      tags: [install, config]
+
+    - name: Enable and start Promtail service
+      systemd:
+        name: promtail
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      tags: [install]
+
+    - name: Wait for Promtail to be ready
+      wait_for:
+        port: "{{ promtail_port }}"
+        timeout: 30
+      tags: [install, verify]
+
+    - name: Display Promtail status
+      debug:
+        msg: |
+          =============================================
+          Promtail Installation Complete!
+          =============================================
+
+          Node: {{ ansible_hostname }}
+          Version: {{ promtail_version }}
+          Architecture: {{ promtail_arch }}
+          API Port: {{ promtail_port }}
+          Loki Server: {{ loki_server }}
+          Docker Logs: {{ 'Enabled' if docker_installed else 'Disabled' }}
+
+          Logs being shipped:
+          - System logs (/var/log/*.log)
+          - Syslog
+          - Auth logs
+          - Systemd journal
+          {% if docker_installed %}- Docker container logs{% endif %}
+
+          Check status: sudo systemctl status promtail
+          View logs: sudo journalctl -u promtail -f
+          Test API: curl http://localhost:{{ promtail_port }}/metrics
+          =============================================
+      tags: [install, verify]
+
+  handlers:
+    - name: restart promtail
+      systemd:
+        name: promtail
+        state: restarted
+        daemon_reload: yes
+
+# Post-installation verification
+- name: Verify Promtail Installation
+  hosts: cluster_nodes
+  become: yes
+  tasks:
+    - name: Check Promtail service status
+      command: systemctl is-active promtail
+      register: promtail_status
+      changed_when: false
+      tags: [verify]
+
+    - name: Verify Promtail is running
+      assert:
+        that:
+          - promtail_status.stdout == "active"
+        success_msg: "Promtail is running on {{ ansible_hostname }}"
+        fail_msg: "Promtail is not running on {{ ansible_hostname }}"
+      tags: [verify]
+
+    - name: Test Promtail metrics endpoint
+      uri:
+        url: "http://localhost:{{ promtail_port }}/metrics"
+        method: GET
+        return_content: no
+        status_code: 200
+      tags: [verify]
+
+    - name: Display verification summary
+      debug:
+        msg: |
+          =============================================
+          Promtail Verification Complete
+          =============================================
+
+          Node: {{ ansible_hostname }}
+          Status: {{ promtail_status.stdout }}
+
+          Logs are now being shipped to:
+          {{ loki_server }}
+
+          View logs in Grafana with Loki datasource.
+          =============================================
+      tags: [verify]
